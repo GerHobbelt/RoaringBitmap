@@ -226,9 +226,9 @@ You can serialize and deserialize bitmaps:
 Observe how, after calling `deserialize`, we call `validate()`: when deserializing
 content from untrusted sources, we recommand calling `validate()` to ensure that the
 content is a valid bitmap. Furthermore, we recommend using hashing to ensure that
-the content has not been tempered with.
+the content has not been tampered with.
 
-This last examples also illustrates the use of `runOptimize()` which is sometimes
+This last example also illustrates the use of `runOptimize()` which is sometimes
 helpful to reduce the size of the bitmaps.
 
 Please see the examples folder for more examples, which you can run with `./gradlew :examples:runAll`, or run a specific one with `./gradlew :examples:runExampleBitmap64`, etc.
