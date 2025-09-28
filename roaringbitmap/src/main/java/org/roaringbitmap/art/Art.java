@@ -1,6 +1,7 @@
 package org.roaringbitmap.art;
 
 import org.roaringbitmap.ArraysShim;
+import org.roaringbitmap.longlong.LongUtils;
 
 import java.io.DataInput;
 import java.io.DataOutput;
@@ -54,6 +55,18 @@ public class Art {
     return BranchNode.ILLEGAL_IDX;
   }
 
+  /**
+   * @param key the high 48 bit of the long data
+   * @return the key's corresponding containerIdx
+   */
+  public long findByKey(long key) {
+    LeafNode node = findByKey(root, key);
+    if (node != null) {
+      return node.containerIdx;
+    }
+    return BranchNode.ILLEGAL_IDX;
+  }
+
   private Node findByKey(Node node, byte[] key, int depth) {
     while (node != null) {
       if (node instanceof LeafNode) {
@@ -76,14 +89,15 @@ public class Art {
         return leafNode;
       }
       BranchNode branchNode = (BranchNode) node;
-      if (branchNode.prefixLength > 0) {
+      byte branchNodePrefixLength = branchNode.prefixLength();
+      if (branchNodePrefixLength > 0) {
         int commonLength =
-            commonPrefixLength(key, depth, key.length, branchNode.prefix, 0, branchNode.prefixLength);
-        if (commonLength != branchNode.prefixLength) {
+            commonPrefixLength(key, depth, key.length, branchNode.prefix, 0, branchNodePrefixLength);
+        if (commonLength != branchNodePrefixLength) {
           return null;
         }
         // common prefix is the same ,then increase the depth
-        depth += branchNode.prefixLength;
+        depth += branchNodePrefixLength;
       }
       int pos = branchNode.getChildPos(key[depth]);
       if (pos == BranchNode.ILLEGAL_IDX) {
@@ -91,6 +105,41 @@ public class Art {
       }
       node = branchNode.getChild(pos);
       depth++;
+    }
+    return null;
+  }
+  private LeafNode findByKey(Node node, long key) {
+    int depth = 0;
+    while (node != null) {
+      //compare branch node first, its most common case
+      if (node instanceof BranchNode) {
+        BranchNode branchNode = (BranchNode) node;
+        byte branchNodePrefixLength = branchNode.prefixLength();
+        if (branchNodePrefixLength > 0) {
+          //TODO - we should expose a prefix() that is a long. So much time spend looping here
+          // when this could be a O(1) long mask & compare
+          byte[] prefix = branchNode.prefix;
+          for (int i = 0; i < branchNodePrefixLength; i++) {
+            // compare the prefix byte with the key byte
+            if (prefix[i] != LongUtils.getByte(key, depth + i)) {
+              return null;
+            }
+          }
+          // common prefix is the same ,then increase the depth
+          depth += branchNodePrefixLength;
+        }
+        //TODO - expose an API that avoids this double dipping
+        int pos = branchNode.getChildPos(LongUtils.getByte(key, depth));
+        if (pos == BranchNode.ILLEGAL_IDX) {
+          return null;
+        }
+        node = branchNode.getChild(pos);
+        depth++;
+      } else {
+        LeafNode leafNode = (LeafNode) node;
+        long leafNodeKey = leafNode.getKey();
+        return leafNodeKey == LongUtils.rightShiftHighPart(key)? leafNode: null;
+      }
     }
     return null;
   }
@@ -136,13 +185,14 @@ public class Art {
       }
     }
     BranchNode branchNode = (BranchNode) node;
-    if (branchNode.prefixLength > 0) {
+    byte branchNodePrefixLength = branchNode.prefixLength();
+    if (branchNodePrefixLength > 0) {
       int commonLength =
-          commonPrefixLength(key, dep, key.length, branchNode.prefix, 0, branchNode.prefixLength);
-      if (commonLength != branchNode.prefixLength) {
+          commonPrefixLength(key, dep, key.length, branchNode.prefix, 0, branchNodePrefixLength);
+      if (commonLength != branchNodePrefixLength) {
         return null;
       }
-      dep += branchNode.prefixLength;
+      dep += branchNodePrefixLength;
     }
     int pos = branchNode.getChildPos(key[dep]);
     if (pos != BranchNode.ILLEGAL_IDX) {
@@ -224,42 +274,40 @@ public class Art {
 
       Node4 node4 = new Node4(commonPrefix);
       // copy common prefix
-      node4.prefixLength = (byte) commonPrefix;
       System.arraycopy(key, depth, node4.prefix, 0, commonPrefix);
       // generate two leaf nodes as the children of the fresh node4
-      Node4.insert(node4, leafNode, prefix[depth + commonPrefix]);
+      node4.insert(leafNode, prefix[depth + commonPrefix]);
       LeafNode anotherLeaf = new LeafNode(key, containerIdx);
-      Node4.insert(node4, anotherLeaf, key[depth + commonPrefix]);
+      node4.insert(anotherLeaf, key[depth + commonPrefix]);
       // replace the current node with this internal node4
       return node4;
     }
     BranchNode branchNode = (BranchNode) node;
+    byte branchNodePrefixLength = branchNode.prefixLength();
     // to a inner node case
-    if (branchNode.prefixLength > 0) {
+    if (branchNodePrefixLength > 0) {
       // find the mismatch position
       int mismatchPos =
-          ArraysShim.mismatch(branchNode.prefix, 0, branchNode.prefixLength, key, depth, key.length);
-      if (mismatchPos != branchNode.prefixLength) {
+          ArraysShim.mismatch(branchNode.prefix, 0, branchNodePrefixLength, key, depth, key.length);
+      if (mismatchPos != branchNodePrefixLength) {
         Node4 node4 = new Node4(mismatchPos);
         // copy prefix
-        node4.prefixLength = (byte) mismatchPos;
         System.arraycopy(branchNode.prefix, 0, node4.prefix, 0, mismatchPos);
         // split the current internal node, spawn a fresh node4 and let the
         // current internal node as its children.
-        Node4.insert(node4, branchNode, branchNode.prefix[mismatchPos]);
-        int nodeOriginalPrefixLength = branchNode.prefixLength;
-        branchNode.prefixLength = (byte) (nodeOriginalPrefixLength - (mismatchPos + (byte) 1));
+        node4.insert(branchNode, branchNode.prefix[mismatchPos]);
+        int newPrefixLength = (int) branchNodePrefixLength - (mismatchPos + 1);
         // move the remained common prefix of the initial internal node
-        if (branchNode.prefixLength > 0) {
-          System.arraycopy(branchNode.prefix, mismatchPos + 1, branchNode.prefix, 0, branchNode.prefixLength);
-        } else {
-          branchNode.prefix = EMPTY_BYTES;
-        }
+        // as the new prefix is always > 0, we just allocate and fill the new prefix
+        byte[] branchNodeNewPrefix = new byte[newPrefixLength];
+        System.arraycopy(branchNode.prefix, mismatchPos + 1, branchNodeNewPrefix, 0, newPrefixLength);
+        branchNode.prefix = branchNodeNewPrefix;
+
         LeafNode leafNode = new LeafNode(key, containerIdx);
-        Node4.insert(node4, leafNode, key[mismatchPos + depth]);
+        node4.insert(leafNode, key[mismatchPos + depth]);
         return node4;
       }
-      depth += branchNode.prefixLength;
+      depth += branchNodePrefixLength;
     }
     int pos = branchNode.getChildPos(key[depth]);
     if (pos != BranchNode.ILLEGAL_IDX) {
@@ -273,8 +321,7 @@ public class Art {
     }
     // insert the key as a child leaf node of the current internal node
     LeafNode leafNode = new LeafNode(key, containerIdx);
-    Node freshOne = BranchNode.insertLeaf(branchNode, leafNode, key[depth]);
-    return freshOne;
+    return branchNode.insert(leafNode, key[depth]);
   }
 
   // find common prefix length

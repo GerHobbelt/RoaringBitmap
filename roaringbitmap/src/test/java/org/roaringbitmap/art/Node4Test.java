@@ -9,7 +9,25 @@ import java.io.DataInputStream;
 import java.io.DataOutputStream;
 import java.io.IOException;
 
+import java.util.Arrays;
+
+import static org.junit.jupiter.api.Assertions.assertSame;
+
 public class Node4Test {
+
+  private void assertContent(Node4 node4, Node ... children) {
+    Assertions.assertEquals(children.length, node4.count);
+    Assertions.assertArrayEquals(Arrays.copyOf(children, 4), node4.children);
+  }
+
+  private void assertKeys(Node4 node4, byte ... keys) {
+    Assertions.assertEquals(keys.length, node4.count);
+    for (int i = 0; i < keys.length; i++) {
+      Assertions.assertEquals(keys[i], (byte)(node4.key >> (24-8*i)), "key at pos " + i);
+    }
+    //it seems that the rest of the key are undefined
+    //not sure if they should be though
+  }
 
   @Test
   public void testTheBasics() throws IOException {
@@ -17,28 +35,36 @@ public class Node4Test {
     LeafNode leafNode2 = new LeafNode(2, 2);
     LeafNode leafNode3 = new LeafNode(3, 3);
     Node4 node4 = new Node4(0);
+    assertKeys(node4);
+    assertContent(node4);
     byte key1 = 2;
-    Node4.insert(node4, leafNode1, key1);
-    Assertions.assertTrue(node4.getMaxPos() == 0);
-    Assertions.assertTrue(node4.getMinPos() == 0);
-    Assertions.assertTrue(node4.getChildPos(key1) == 0);
-    Assertions.assertTrue(node4.getChildKey(0) == key1);
+    node4.insert(leafNode1, key1);
+    Assertions.assertEquals(0, node4.getMaxPos());
+    Assertions.assertEquals(0, node4.getMinPos());
+    Assertions.assertEquals(0, node4.getChildPos(key1));
+    Assertions.assertEquals(key1, node4.getChildKey(0));
+    assertKeys(node4, key1);
+    assertContent(node4, leafNode1);
 
     byte key2 = 1;
-    node4 = (Node4) Node4.insert(node4, leafNode2, key2);
-    Assertions.assertTrue(node4.getChildPos(key2) == 0);
-    Assertions.assertTrue(node4.getChildPos(key1) == 1);
-    Assertions.assertTrue(node4.getChildKey(0) == key2);
+    node4 = (Node4) node4.insert(leafNode2, key2);
+    Assertions.assertEquals(0, node4.getChildPos(key2));
+    Assertions.assertEquals(1, node4.getChildPos(key1));
+    Assertions.assertEquals(key2, node4.getChildKey(0));
+    assertKeys(node4, key2, key1);
+    assertContent(node4, leafNode2, leafNode1);
 
     byte key3 = -1;
-    node4 = (Node4) Node4.insert(node4, leafNode3, key3);
-    Assertions.assertTrue(node4.getChildPos(key3) == 2);
-    Assertions.assertTrue(node4.getChildKey(2) == key3);
+    node4 = (Node4) node4.insert(leafNode3, key3);
+    Assertions.assertEquals(2, node4.getChildPos(key3));
+    Assertions.assertEquals(key3, node4.getChildKey(2));
     node4 = (Node4) node4.remove(1);
-    Assertions.assertTrue(node4.getChildPos(key2) == 0);
-    Assertions.assertTrue(node4.getChildPos(key3) == 1);
-    Assertions.assertTrue(node4.getChildKey(1) == key3);
-    Assertions.assertTrue(node4.getChildPos(key1) == BranchNode.ILLEGAL_IDX);
+    Assertions.assertEquals(0, node4.getChildPos(key2));
+    Assertions.assertEquals(1, node4.getChildPos(key3));
+    Assertions.assertEquals(key3, node4.getChildKey(1));
+    Assertions.assertEquals(BranchNode.ILLEGAL_IDX, node4.getChildPos(key1));
+    assertKeys(node4, key2, key3);
+    assertContent(node4, leafNode2, leafNode3);
 
     int bytesSize = node4.serializeSizeInBytes();
     ByteArrayOutputStream byteArrayOutputStream = new ByteArrayOutputStream();
@@ -56,6 +82,143 @@ public class Node4Test {
     Node node = node4.remove(0);
     Assertions.assertTrue(node instanceof LeafNode);
   }
+  byte[] keys(int... keys) {
+    byte[] result = new byte[keys.length];
+    for (int i = 0; i < keys.length; i++) {
+      result[i] = (byte) keys[i];
+    }
+    return result;
+  }
+    Node[] nodes(Node... nodes) {
+        return nodes;
+    }
+
+  @Test
+  void testOrderedInsert() {
+    LeafNode leafNode1 = new LeafNode(1, 1);
+    LeafNode leafNode2 = new LeafNode(2, 2);
+    LeafNode leafNode3 = new LeafNode(3, 3);
+    LeafNode leafNode4 = new LeafNode(4, 4);
+
+    Node4 node4 = new Node4(0);
+    addEachNode(node4, nodes(leafNode1, leafNode2, leafNode3, leafNode4), keys(1, 2, 3, 4));
+
+    assertKeys(node4, keys(1,2,3,4));
+    assertContent(node4, nodes(leafNode1, leafNode2, leafNode3, leafNode4));
+
+  }
+  @Test
+  void testUnorderedInsert() {
+    LeafNode leafNode1 = new LeafNode(1, 1);
+    LeafNode leafNode2 = new LeafNode(2, 2);
+    LeafNode leafNode3 = new LeafNode(3, 3);
+    LeafNode leafNode4 = new LeafNode(4, 4);
+
+    Node4 node4 = new Node4(0);
+    addEachNode(node4, nodes(leafNode2, leafNode4, leafNode3, leafNode1), keys(2,4,3,1));
+
+    assertKeys(node4, keys(1,2,3,4));
+    assertContent(node4, nodes(leafNode1, leafNode2, leafNode3, leafNode4));
+
+  }
+  @Test
+  void testRemoveFullLast() {
+    LeafNode leafNode1 = new LeafNode(1, 1);
+    LeafNode leafNode2 = new LeafNode(2, 2);
+    LeafNode leafNode3 = new LeafNode(3, 3);
+    LeafNode leafNode4 = new LeafNode(4, 4);
+
+    Node4 node4 = new Node4(0);
+    addEachNode(node4, nodes(leafNode1, leafNode2, leafNode3, leafNode4), keys(1,2,3,4));
+
+    node4.remove(3);
+    assertKeys(node4, keys(1,2,3));
+    assertContent(node4, nodes(leafNode1, leafNode2, leafNode3));
+
+  }
+  @Test
+  void testRemoveFullMiddle() {
+    LeafNode leafNode1 = new LeafNode(1, 1);
+    LeafNode leafNode2 = new LeafNode(2, 2);
+    LeafNode leafNode3 = new LeafNode(3, 3);
+    LeafNode leafNode4 = new LeafNode(4, 4);
+
+    Node4 node4 = new Node4(0);
+    addEachNode(node4, nodes(leafNode1, leafNode2, leafNode3, leafNode4), keys(1,2,3,4));
+
+    node4.remove(1);
+    assertKeys(node4, keys(1,3,4));
+    assertContent(node4, nodes(leafNode1, leafNode3, leafNode4));
+
+  }
+  @Test
+  void testRemoveFullFirst() {
+    LeafNode leafNode1 = new LeafNode(1, 1);
+    LeafNode leafNode2 = new LeafNode(2, 2);
+    LeafNode leafNode3 = new LeafNode(3, 3);
+    LeafNode leafNode4 = new LeafNode(4, 4);
+
+    Node4 node4 = new Node4(0);
+    addEachNode(node4, nodes(leafNode1, leafNode2, leafNode3, leafNode4), keys(1,2,3,4));
+
+    node4.remove(0);
+    assertKeys(node4, keys(2,3,4));
+    assertContent(node4, nodes(leafNode2, leafNode3, leafNode4));
+
+  }
+  @Test
+  void testRemoveNotFullLast() {
+    LeafNode leafNode1 = new LeafNode(1, 1);
+    LeafNode leafNode2 = new LeafNode(2, 2);
+    LeafNode leafNode3 = new LeafNode(3, 3);
+
+    Node4 node4 = new Node4(0);
+    addEachNode(node4, nodes(leafNode1, leafNode2, leafNode3), keys(1,2,3));
+
+    node4.remove(2);
+    assertKeys(node4, keys(1,2));
+    assertContent(node4, nodes(leafNode1, leafNode2));
+
+  }
+  @Test
+  void testRemoveNotFullMiddle() {
+    LeafNode leafNode1 = new LeafNode(1, 1);
+    LeafNode leafNode2 = new LeafNode(2, 2);
+    LeafNode leafNode3 = new LeafNode(3, 3);
+
+    Node4 node4 = new Node4(0);
+    addEachNode(node4, nodes(leafNode1, leafNode2, leafNode3), keys(1,2,3));
+
+    node4.remove(1);
+    assertKeys(node4, keys(1,3));
+    assertContent(node4, nodes(leafNode1, leafNode3));
+
+  }
+  @Test
+  void testRemoveNotFullFirst() {
+    LeafNode leafNode1 = new LeafNode(1, 1);
+    LeafNode leafNode2 = new LeafNode(2, 2);
+    LeafNode leafNode3 = new LeafNode(3, 3);
+
+    Node4 node4 = new Node4(0);
+    addEachNode(node4, nodes(leafNode1, leafNode2, leafNode3), keys(1,2,3));
+
+    node4.remove(0);
+    assertKeys(node4, keys(2,3));
+    assertContent(node4, nodes(leafNode2, leafNode3));
+
+  }
+
+  private void addEachNode(Node4 node4, Node[] nodes, byte[] keys) {
+    Assertions.assertEquals(nodes.length, keys.length, "Nodes and keys should have the same length");
+    for (int i = 0; i < nodes.length; i++) {
+      Node node = nodes[i];
+      byte key = keys[i];
+      Node result = node4.insert(node, key);
+      assertSame(node4, result, "Inserting node at position " + i + " with key " + key);
+      Assertions.assertEquals(i+1, node4.count);
+    }
+  }
 
   @Test
   public void testGetNearestChildPosWithOneItem() {
@@ -65,7 +228,7 @@ public class Node4Test {
 
     Node4 node = new Node4(0);
 
-    Node4.insert(node, ln1, key1);
+    node.insert(ln1, key1);
 
     // search for the key we just added returns the
     SearchResult sr = node.getNearestChildPos(key1);
@@ -108,8 +271,8 @@ public class Node4Test {
 
     Node4 node = new Node4(0);
 
-    Node4.insert(node, ln1, key1);
-    Node4.insert(node, ln2, key2);
+    node.insert(ln1, key1);
+    node.insert(ln2, key2);
 
     // value checks
     Assertions.assertTrue((key1 + 1) < (key2 - 1));
@@ -176,7 +339,7 @@ public class Node4Test {
     for (int i = 0; i < insertCount; i++) {
       LeafNode leafNode = new LeafNode(i, i);
       byte key = (byte) (i + keyOffset);
-      nodes = Node4.insert(nodes, leafNode, key);
+      nodes = nodes.insert(leafNode, key);
     }
     // check we are testing the correct thing
     Assertions.assertTrue(nodes instanceof Node4);
@@ -219,7 +382,7 @@ public class Node4Test {
     for (int i = 0; i < insertCount; i++) {
       LeafNode leafNode = new LeafNode(i, i);
       byte key = (byte) ((i * step) + keyOffset);
-      nodes = Node4.insert(nodes, leafNode, key);
+      nodes = nodes.insert(leafNode, key);
     }
     // check we are testing the correct thing
     Assertions.assertTrue(nodes instanceof Node4);
@@ -301,7 +464,7 @@ public class Node4Test {
 
     // setup data
     for (int i = 0; i < insertCount; i++) {
-      nodes = Node4.insert(nodes, leafNode, (byte) (offset + i));
+      nodes = nodes.insert(leafNode, (byte) (offset + i));
     }
     // check we are testing the correct data structure
     Assertions.assertTrue(nodes instanceof Node4);
@@ -341,7 +504,7 @@ public class Node4Test {
 
     // setup data
     for (int i = 0; i < insertCount; i++) {
-      nodes = Node4.insert(nodes, leafNode, (byte) (offset + (i * step)));
+      nodes = nodes.insert(leafNode, (byte) (offset + (i * step)));
     }
     // check we are testing the correct data structure
     Assertions.assertTrue(nodes instanceof Node4);
