@@ -2,6 +2,8 @@ plugins {
     id("net.researchgate.release") version "2.8.1"
     id("com.github.ben-manes.versions") version "0.38.0"
     id("maven-publish")
+    id("signing")
+    id("org.jreleaser") version "1.15.0"
     id("com.diffplug.spotless") version "6.25.0"
 }
 
@@ -88,7 +90,7 @@ subprojects.filter { listOf("roaringbitmap", "bsi").contains(it.name) }.forEach 
 
         configure<PublishingExtension> {
             publications {
-                register<MavenPublication>("sonatype") {
+                register<MavenPublication>("mavenJava") {
                     groupId = project.group.toString()
                     artifactId = project.name
                     version = project.version.toString()
@@ -133,15 +135,14 @@ subprojects.filter { listOf("roaringbitmap", "bsi").contains(it.name) }.forEach 
             }
 
              // A safe throw-away place to publish to:
-            // ./gradlew publishSonatypePublicationToLocalDebugRepository -Pversion=foo
+            // ./gradlew publishMavenJavaPublicationToLocalDebugRepository -Pversion=foo
             repositories {
                 maven {
-                    name = "localDebug"
                     url = project.layout.buildDirectory.dir("repos/localDebug").get().asFile.toURI()
                 }
             }
 
-            // ./gradlew publishSonatypePublicationToGitHubPackagesRepository
+            // ./gradlew publishMavenJavaPublicationToGitHubPackagesRepository
             repositories {
                 maven {
                     name = "GitHubPackages"
@@ -155,7 +156,6 @@ subprojects.filter { listOf("roaringbitmap", "bsi").contains(it.name) }.forEach 
 
         }
 
-
     }
 }
 
@@ -164,4 +164,7 @@ release {
     // instead of just 0.1.0 or v0.1.0.
     tagTemplate = "\$version"
 }
-	
+
+jreleaser {
+    // Configuration in jreleaser.yml
+}
