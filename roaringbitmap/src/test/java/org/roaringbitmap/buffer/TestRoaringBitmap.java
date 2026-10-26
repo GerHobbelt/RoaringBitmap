@@ -31,6 +31,7 @@ import java.io.InputStream;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.nio.CharBuffer;
 import java.util.Arrays;
 import java.util.BitSet;
@@ -197,6 +198,31 @@ public class TestRoaringBitmap {
     assertEquals(10000, r.limit(10000).getCardinality());
     assertEquals(100000, r.limit(100000).getCardinality());
     assertEquals(1000000, r.limit(1000000).getCardinality());
+  }
+
+  @Test
+  public void limitNearIntegerMaxValueDoesNotOverflow() {
+    // every 32-bit value: 65536 full run containers, so this is cheap
+    MutableRoaringBitmap all = MutableRoaringBitmap.bitmapOfRange(0L, 1L << 32);
+    ByteBuffer serialized = ByteBuffer.allocate(all.serializedSizeInBytes());
+    all.serialize(serialized);
+    serialized.flip();
+    ImmutableRoaringBitmap mapped = new ImmutableRoaringBitmap(serialized);
+    int[] limits = {
+      Integer.MAX_VALUE,
+      Integer.MAX_VALUE - 1000,
+      Integer.MAX_VALUE - 65535,
+      Integer.MAX_VALUE - 65536
+    };
+    for (ImmutableRoaringBitmap source : new ImmutableRoaringBitmap[] {all, mapped}) {
+      for (int n : limits) {
+        MutableRoaringBitmap limited = source.limit(n);
+        assertEquals(n, limited.getLongCardinality());
+        assertEquals(0, limited.first());
+        assertEquals(n - 1, limited.last());
+        assertTrue(limited.validate());
+      }
+    }
   }
 
   @Test
@@ -4164,5 +4190,68 @@ public class TestRoaringBitmap {
         assertEquals(rr, MutableRoaringBitmap.bitmapOfRange(i, j));
       }
     }
+  }
+
+  // byte offsets in the serialized form of a bitmap holding a single run container
+  private static final int RUN_HEADER_CARDINALITY = 7;
+  private static final int RUN_LENGTH = 13;
+
+  private static byte[] serializeToBytes(MutableRoaringBitmap bitmap) {
+    ByteBuffer buffer = ByteBuffer.allocate(bitmap.serializedSizeInBytes());
+    bitmap.serialize(buffer);
+    return buffer.array();
+  }
+
+  @Test
+  public void validateAcceptsRunContainersThatAreNotTheSmallestEncoding() throws IOException {
+    // these operations keep a shrinking run container as a run container
+    MutableRoaringBitmap single = MutableRoaringBitmap.bitmapOfRange(0, 3);
+    single.remove(0);
+    single.remove(1);
+    MutableRoaringBitmap ends = MutableRoaringBitmap.bitmapOfRange(0, 100);
+    ends.remove(1L, 99L);
+    MutableRoaringBitmap manyRuns = MutableRoaringBitmap.bitmapOfRange(0, 12_000);
+    for (int i = 0; i < 3_000; i++) {
+      manyRuns.remove(4 * i + 2);
+      manyRuns.remove(4 * i + 3);
+    }
+    MutableRoaringBitmap[] bitmaps = {
+      single,
+      ends,
+      manyRuns,
+      MutableRoaringBitmap.bitmapOfRange(0, 100).limit(1),
+      MutableRoaringBitmap.bitmapOfRange(0, 100).selectRange(0, 1)
+    };
+    for (MutableRoaringBitmap bitmap : bitmaps) {
+      assertTrue(bitmap.validate(), bitmap::toString);
+      byte[] bytes = serializeToBytes(bitmap);
+      ImmutableRoaringBitmap mapped = new ImmutableRoaringBitmap(ByteBuffer.wrap(bytes));
+      assertTrue(mapped.validate(), bitmap::toString);
+      assertEquals(bitmap, mapped);
+      // the heap and the buffer validators agree on the same bytes
+      RoaringBitmap heap = new RoaringBitmap();
+      heap.deserialize(ByteBuffer.wrap(bytes));
+      assertTrue(heap.validate(), bitmap::toString);
+    }
+  }
+
+  @Test
+  public void validateRejectsRunPastTheEndOfTheContainer() {
+    byte[] bytes = serializeToBytes(MutableRoaringBitmap.bitmapOfRange(65_000, 65_536));
+    ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).putChar(RUN_LENGTH, (char) 535);
+    assertTrue(new ImmutableRoaringBitmap(ByteBuffer.wrap(bytes)).validate()); // ends at 65,535
+    ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).putChar(RUN_LENGTH, (char) 536);
+    assertFalse(new ImmutableRoaringBitmap(ByteBuffer.wrap(bytes)).validate()); // ends at 65,536
+  }
+
+  @Test
+  public void validateRejectsWrongHeaderCardinality() {
+    byte[] bytes = serializeToBytes(MutableRoaringBitmap.bitmapOfRange(1_000, 1_536));
+    assertTrue(new ImmutableRoaringBitmap(ByteBuffer.wrap(bytes)).validate());
+    // the header now says 100 values, the run holds 536
+    ByteBuffer.wrap(bytes)
+        .order(ByteOrder.LITTLE_ENDIAN)
+        .putChar(RUN_HEADER_CARDINALITY, (char) 99);
+    assertFalse(new ImmutableRoaringBitmap(ByteBuffer.wrap(bytes)).validate());
   }
 }

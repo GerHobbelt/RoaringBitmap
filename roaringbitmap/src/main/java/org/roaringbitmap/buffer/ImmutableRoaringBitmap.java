@@ -393,6 +393,11 @@ public class ImmutableRoaringBitmap
 
   /**
    * Validate the content of the bitmap. Useful after deserialization.
+   *
+   * It checks that the bitmap is well formed: keys are sorted, and each container is consistent
+   * with its type. It does not check that each container uses the most compact encoding: call
+   * {@link MutableRoaringBitmap#runOptimize()} for that.
+   *
    * @return true if the content is valid.
    */
   public Boolean validate() {
@@ -540,10 +545,10 @@ public class ImmutableRoaringBitmap
     }
     int correction = 0;
     for (int i = 0; i < x2.highLowContainer.size() - remainder; ++i) {
-      correction += x2.highLowContainer.getContainerAtIndex(i).isFull() ? 1 : 0;
-      if (x2.highLowContainer.getKeyAtIndex(i) >= maxKey) {
+      if (x2.highLowContainer.getKeyAtIndex(i) > maxKey) {
         break;
       }
+      correction += x2.highLowContainer.getContainerAtIndex(i).isFull() ? 1 : 0;
     }
     // it's almost certain that the bitmap will grow, so make a conservative overestimate,
     // this avoids temporary allocation, and can trim afterwards
@@ -576,8 +581,11 @@ public class ImmutableRoaringBitmap
         ++pos1;
         s1 = pos1 < length1 ? x1.highLowContainer.getKeyAtIndex(pos1) : maxKey + 1;
       } else if (key == s2) { // insert the complement
+        int endOfRange = key == maxKey ? lastRun : 0x10000;
+        MappeableContainer complement =
+            x2.highLowContainer.getContainerAtIndex(pos2).not(0, endOfRange);
         newValues[size] =
-            x2.highLowContainer.getContainerAtIndex(pos2).not(0, key == maxKey ? lastRun : 0x10000);
+            endOfRange < 0x10000 ? complement.iremove(endOfRange, 0x10000) : complement;
         ++pos2;
         s2 = pos2 < length2 ? x2.highLowContainer.getKeyAtIndex(pos2) : maxKey + 1;
       } else { // key missing from both
@@ -1262,14 +1270,15 @@ public class ImmutableRoaringBitmap
       return false;
     }
     char firstKey = highbits(minimum);
-    char lastKey = highbits(supremum);
+    // the key of the exclusive bound: 0x10000 when supremum is 2^32
+    int lastKey = (int) (supremum >>> 16);
     int span = (lastKey) - (firstKey);
     int len = highLowContainer.size();
     if (len < span) {
       return false;
     }
     int begin = highLowContainer.getIndex(firstKey);
-    int end = highLowContainer.getIndex(lastKey);
+    int end = lastKey > 0xFFFF ? len : highLowContainer.getIndex((char) lastKey);
     end = end < 0 ? -end - 1 : end;
     if (begin < 0 || end - begin != span) {
       return false;
@@ -1278,14 +1287,16 @@ public class ImmutableRoaringBitmap
     int min = (char) minimum;
     int sup = (char) supremum;
     if (firstKey == lastKey) {
-      return highLowContainer
-          .getContainerAtIndex(begin)
-          .contains(min, (supremum & 0xFFFF) == 0 ? 0x10000 : sup);
+      return highLowContainer.getContainerAtIndex(begin).contains(min, sup);
     }
     if (!highLowContainer.getContainerAtIndex(begin).contains(min, 1 << 16)) {
       return false;
     }
-    if (sup != 0 && end < len && !highLowContainer.getContainerAtIndex(end).contains(0, sup)) {
+    // a partial last key must be present itself: the container at end may belong to a later key
+    if (sup != 0
+        && (end == len
+            || highLowContainer.getKeyAtIndex(end) != lastKey
+            || !highLowContainer.getContainerAtIndex(end).contains(0, sup))) {
       return false;
     }
     for (int i = begin + 1; i < end; ++i) {
@@ -1717,18 +1728,16 @@ public class ImmutableRoaringBitmap
   @Override
   public MutableRoaringBitmap limit(int maxcardinality) {
     MutableRoaringBitmap answer = new MutableRoaringBitmap();
-    int currentcardinality = 0;
-    for (int i = 0;
-        (currentcardinality < maxcardinality) && (i < this.highLowContainer.size());
-        i++) {
+    // count down: summing cardinalities upwards would overflow an int
+    int remaining = maxcardinality;
+    for (int i = 0; (remaining > 0) && (i < this.highLowContainer.size()); i++) {
       MappeableContainer c = this.highLowContainer.getContainerAtIndex(i);
-      if (c.getCardinality() + currentcardinality <= maxcardinality) {
+      if (c.getCardinality() <= remaining) {
         ((MutableRoaringArray) answer.highLowContainer)
             .append(this.highLowContainer.getKeyAtIndex(i), c.clone());
-        currentcardinality += c.getCardinality();
+        remaining -= c.getCardinality();
       } else {
-        int leftover = maxcardinality - currentcardinality;
-        MappeableContainer limited = c.limit(leftover);
+        MappeableContainer limited = c.limit(remaining);
         ((MutableRoaringArray) answer.highLowContainer)
             .append(this.highLowContainer.getKeyAtIndex(i), limited);
         break;

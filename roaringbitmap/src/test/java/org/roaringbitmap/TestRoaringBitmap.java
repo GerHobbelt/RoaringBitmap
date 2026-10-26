@@ -32,6 +32,7 @@ import java.io.IOException;
 import java.io.ObjectInputStream;
 import java.io.ObjectOutputStream;
 import java.nio.ByteBuffer;
+import java.nio.ByteOrder;
 import java.util.ArrayList;
 import java.util.Arrays;
 import java.util.BitSet;
@@ -182,6 +183,25 @@ public class TestRoaringBitmap {
     assertEquals(10000, r.limit(10000).getCardinality());
     assertEquals(100000, r.limit(100000).getCardinality());
     assertEquals(1000000, r.limit(1000000).getCardinality());
+  }
+
+  @Test
+  public void limitNearIntegerMaxValueDoesNotOverflow() {
+    // every 32-bit value: 65536 full run containers, so this is cheap
+    RoaringBitmap all = RoaringBitmap.bitmapOfRange(0L, 1L << 32);
+    int[] limits = {
+      Integer.MAX_VALUE,
+      Integer.MAX_VALUE - 1000,
+      Integer.MAX_VALUE - 65535,
+      Integer.MAX_VALUE - 65536
+    };
+    for (int n : limits) {
+      RoaringBitmap limited = all.limit(n);
+      assertEquals(n, limited.getLongCardinality());
+      assertEquals(0, limited.first());
+      assertEquals(n - 1, limited.last());
+      assertTrue(limited.validate());
+    }
   }
 
   @Test
@@ -5488,6 +5508,80 @@ public class TestRoaringBitmap {
   }
 
   @Test
+  public void testContainsRange_LastKeyAbsent() {
+    RoaringBitmap bitmap = RoaringBitmap.bitmapOfRange(0, 1 << 16);
+    assertTrue(bitmap.contains(0L, 1L << 16));
+    assertFalse(bitmap.contains(0L, (1L << 16) + 1));
+    // a later container holding the low bits of the bound must not stand in for the absent key
+    bitmap.add(3 << 16);
+    assertFalse(bitmap.contains(0L, (1L << 16) + 1));
+    assertTrue(bitmap.contains(0L, 1L << 16));
+  }
+
+  @Test
+  public void testContainsRange_EndOfUniverse() {
+    RoaringBitmap low = RoaringBitmap.bitmapOfRange(0, 1 << 16);
+    assertFalse(low.contains(0L, 1L << 32));
+    assertFalse(low.contains(5L, 1L << 32));
+    RoaringBitmap top = RoaringBitmap.bitmapOf(-1);
+    assertTrue(top.contains(0xFFFFFFFFL, 1L << 32));
+    assertFalse(top.contains(0xFFFFFFFEL, 1L << 32));
+    RoaringBitmap lastKey = RoaringBitmap.bitmapOfRange(0xFFFF0000L, 1L << 32);
+    assertTrue(lastKey.contains(0xFFFF0000L, 1L << 32));
+    assertTrue(lastKey.contains(0xFFFF8000L, 1L << 32));
+    assertFalse(lastKey.contains(0xFFFEFFFFL, 1L << 32));
+    RoaringBitmap all = RoaringBitmap.bitmapOfRange(0, 1L << 32);
+    assertTrue(all.contains(0L, 1L << 32));
+    assertTrue(all.contains(5L, 1L << 32));
+  }
+
+  @Test
+  public void testContainsRange_AgreesWithRangeCardinality() {
+    long[] points = {
+      0,
+      1,
+      0xFFFF,
+      0x10000,
+      0x10001,
+      0x1FFFF,
+      0x20000,
+      0x30000,
+      0x30001,
+      0xFFFEFFFFL,
+      0xFFFF0000L,
+      0xFFFF0001L,
+      0xFFFFFFFEL,
+      0xFFFFFFFFL,
+      1L << 32
+    };
+    RoaringBitmap gap = RoaringBitmap.bitmapOfRange(0, 1 << 16);
+    gap.add(3 << 16);
+    RoaringBitmap ends = RoaringBitmap.bitmapOfRange(0, 2 << 16);
+    ends.add(0xFFFF0000L, 1L << 32);
+    RoaringBitmap[] bitmaps = {
+      RoaringBitmap.bitmapOfRange(0, 1 << 16),
+      gap,
+      ends,
+      RoaringBitmap.bitmapOfRange(0xFFFE0000L, 1L << 32),
+      RoaringBitmap.bitmapOf(0, 1 << 16, 3 << 16, -2, -1),
+      RoaringBitmap.bitmapOfRange(0, 1L << 32)
+    };
+    for (RoaringBitmap bitmap : bitmaps) {
+      for (long min : points) {
+        for (long sup : points) {
+          if (min < sup && min < (1L << 32)) {
+            boolean expected = bitmap.rangeCardinality(min, sup) == sup - min;
+            assertEquals(
+                expected,
+                bitmap.contains(min, sup),
+                "contains(" + min + ", " + sup + ") on " + bitmap.getLongCardinality() + " values");
+          }
+        }
+      }
+    }
+  }
+
+  @Test
   public void addoffset() {
     final RoaringBitmap rb = new RoaringBitmap();
     rb.add(10);
@@ -5997,5 +6091,57 @@ public class TestRoaringBitmap {
   public void testContainerSizeRoaringBitmapSingle() {
     RoaringBitmap r = RoaringBitmap.bitmapOfRange(1, 100);
     assertEquals(1, r.getContainerCount());
+  }
+
+  // byte offset of the run length in the serialized form of a bitmap holding one run container
+  private static final int RUN_LENGTH = 13;
+
+  private static byte[] serializeToBytes(RoaringBitmap bitmap) {
+    ByteBuffer buffer = ByteBuffer.allocate(bitmap.serializedSizeInBytes());
+    bitmap.serialize(buffer);
+    return buffer.array();
+  }
+
+  private static RoaringBitmap deserializeFromBytes(byte[] bytes) throws IOException {
+    RoaringBitmap bitmap = new RoaringBitmap();
+    bitmap.deserialize(ByteBuffer.wrap(bytes));
+    return bitmap;
+  }
+
+  @Test
+  public void validateAcceptsRunContainersThatAreNotTheSmallestEncoding() throws IOException {
+    // these operations keep a shrinking run container as a run container
+    RoaringBitmap single = RoaringBitmap.bitmapOfRange(0, 3);
+    single.remove(0);
+    single.remove(1);
+    RoaringBitmap ends = RoaringBitmap.bitmapOfRange(0, 100);
+    ends.remove(1L, 99L);
+    RoaringBitmap manyRuns = RoaringBitmap.bitmapOfRange(0, 12_000);
+    for (int i = 0; i < 3_000; i++) {
+      manyRuns.remove(4 * i + 2);
+      manyRuns.remove(4 * i + 3);
+    }
+    RoaringBitmap[] bitmaps = {
+      single,
+      ends,
+      manyRuns,
+      RoaringBitmap.bitmapOfRange(0, 100).limit(1),
+      RoaringBitmap.bitmapOfRange(0, 100).selectRange(0, 1)
+    };
+    for (RoaringBitmap bitmap : bitmaps) {
+      assertTrue(bitmap.validate(), bitmap::toString);
+      RoaringBitmap copy = deserializeFromBytes(serializeToBytes(bitmap));
+      assertTrue(copy.validate(), bitmap::toString);
+      assertEquals(bitmap, copy);
+    }
+  }
+
+  @Test
+  public void validateRejectsRunPastTheEndOfTheContainer() throws IOException {
+    byte[] bytes = serializeToBytes(RoaringBitmap.bitmapOfRange(65_000, 65_536));
+    ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).putChar(RUN_LENGTH, (char) 535);
+    assertTrue(deserializeFromBytes(bytes).validate()); // the run ends at 65,535
+    ByteBuffer.wrap(bytes).order(ByteOrder.LITTLE_ENDIAN).putChar(RUN_LENGTH, (char) 536);
+    assertFalse(deserializeFromBytes(bytes).validate()); // the run ends at 65,536
   }
 }
